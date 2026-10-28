@@ -379,8 +379,24 @@ const ICON={
 /* ---------- render ---------- */
 const app=document.getElementById("app");
 function render(){
+  const before=new Map();
+  app.querySelectorAll("[data-fk]").forEach(el=>before.set(el.dataset.fk,el.getBoundingClientRect()));
   if(S.screen==="live"&&S.live) renderLive();
   else if(S.screen==="setup"||!S.m) renderSetup(); else renderMatch();
+  flip(before);
+}
+// Smoothly move players from their old spot to the new one (rotations, substitutions, side swaps)
+function flip(before){
+  if(!before.size||!Element.prototype.animate) return;
+  if(window.matchMedia&&matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  app.querySelectorAll("[data-fk]").forEach(el=>{
+    const a=before.get(el.dataset.fk); if(!a) return;
+    const b=el.getBoundingClientRect(), dx=a.left-b.left, dy=a.top-b.top;
+    if(Math.abs(dx)<2&&Math.abs(dy)<2) return;
+    const box=el.closest(".slot")||el; box.style.zIndex="20"; el.style.zIndex="20";
+    const an=el.animate([{transform:`translate(${dx}px,${dy}px) scale(1.08)`},{transform:"translate(0,0) scale(1.08)",offset:.85},{transform:"none"}],{duration:900,easing:"cubic-bezier(.45,0,.2,1)"});
+    an.onfinish=an.oncancel=()=>{box.style.zIndex="";el.style.zIndex="";};
+  });
 }
 function renderSetup(){
   const errs=validate(), c=S.config;
@@ -434,7 +450,7 @@ function playerBtn(t,id,opts={}){
   if(!p) return `<button class="pl empty" data-a="${opts.action||""}" data-t="${t}" data-i="${opts.i}" aria-label="Choose player for position ${opts.i+1}">+</button>`;
   const chips=p.tags.filter(k=>k!=="L"&&k!=="OH"&&k!=="MB"&&k!=="OPP").map(k=>`<span class="chip ${k}">${k}</span>`).join("")+(isL(p)?'<span class="chip">L</span>':"");
   const lc=tm.lcolor, ink=(lc==="#ffffff"||lc==="#f2b705")?"#111":"#fff";
-  return `<button class="pl ${isL(p)?"lib":""} ${opts.target?"target":""}" style="--lc:${lc};${isL(p)?"color:"+ink:""}" data-a="${opts.action||"player"}" data-t="${t}" data-pid="${id}" data-i="${opts.i??""}" aria-label="${esc(pLabel(p))}">
+  return `<button class="pl ${isL(p)?"lib":""} ${opts.target?"target":""}" data-fk="${t}:${id}" style="--lc:${lc};${isL(p)?"color:"+ink:""}" data-a="${opts.action||"player"}" data-t="${t}" data-pid="${id}" data-i="${opts.i??""}" aria-label="${esc(pLabel(p))}">
     ${esc(p.num)}${p.name?`<small>${esc(p.name)}</small>`:""}<span class="chips">${chips}</span>${opts.serving?ICON.ball:""}</button>`;
 }
 function renderMatch(){
@@ -626,7 +642,7 @@ function procLive(mt){
   const period=+mt.live_period||0, ev=mt.events||[];
   const teams=["A","B"].map((k,ix)=>{
     const tid=mt["team_"+k+"_id"];
-    const ps=(mt.lineups||[]).filter(l=>l.team_id===tid).map(l=>({pos:String(l.pos_id),num:l.shirt_number,name:l.player_name||"",first:l.first_name||"",lib:l.position==="libero",cap:l.captain==="C",pts:+l.points_scored||0}));
+    const ps=(mt.lineups||[]).filter(l=>l.team_id===tid).map(l=>({pid:String(l.player_id||l.lineup_id),pos:String(l.pos_id),num:l.shirt_number,name:l.player_name||"",first:l.first_name||"",lib:l.position==="libero",cap:l.captain==="C",pts:+l.points_scored||0}));
     let rot=(mt["live_rotation_"+k]||[]).map(String);
     if(!rot.length){ const pp=mt["playing_positions_"+k]; if(pp&&pp[period]&&pp[period].length) rot=pp[period].map(String); }
     const onIds=rot.slice(0,6), court=onIds.map(pid=>ps.find(p=>p.pos===pid)||null);
@@ -671,6 +687,15 @@ async function pollLive(){
 }
 function startPoll(){ stopPoll(); lastSig=""; pollLive(); liveTimer=setInterval(pollLive,5000); }
 function stopPoll(){ if(liveTimer) clearInterval(liveTimer); liveTimer=null; }
+function liveTags(p){ return (S.liveTags||{})[p.pid]||[]; }
+function liveTagSheet(pid){
+  const d=S.live&&S.live.data; if(!d) return;
+  const p=d.teams.flatMap(t=>t.ps).find(x=>x.pid===pid); if(!p) return;
+  const cur=liveTags(p);
+  const html=`<div class="tags" style="margin:4px 0 14px;gap:6px">${TAGS.map(([k,l])=>`<button class="tag ${k} ${cur.includes(k)?"on":""}" style="font-size:15px;padding:8px 10px" data-a="ltag" data-pid="${esc(pid)}" data-k="${k}" title="${l}">${k}</button>`).join("")}</div>
+    <p class="legend" style="margin-top:-6px">S setter, L libero, C captain, OH outside hitter, MB middle blocker, OPP opposite</p>`;
+  sheet("#"+p.num+" "+p.name,"Tags are saved for this player and shown again in future matches.",[{label:"Done",cls:"primary",fn:()=>{closeModal();lastSig="";render();}}],html);
+}
 function renderLive(){
   const L=S.live, d=L.data;
   const open=new Set([...app.querySelectorAll("details[id]")].filter(x=>x.open).map(x=>x.id));
@@ -684,7 +709,9 @@ function renderLive(){
     <div class="score">${tm.pts}${d.serve===t?'<span class="sv">'+ICON.ball+'</span>':""}</div>
     <div class="meta">Timeouts ${tm.to}/${d.maxTO} · Subs ${tm.subs}/${d.maxSubs}</div></div>`;};
   const pl=(p,serving)=>{ if(!p) return `<div class="pl empty">?</div>`;
-    return `<div class="pl ${p.lib?"lib":""}" style="--lc:#e53935" title="${esc(p.name)}">${esc(p.num)}${p.first?`<small>${esc(p.first)}</small>`:""}<span class="chips">${p.cap?'<span class="chip C">C</span>':""}${p.lib?'<span class="chip">L</span>':""}</span>${serving?ICON.ball:""}</div>`;};
+    const tg=liveTags(p), lib=p.lib||tg.includes("L"), cap=p.cap||tg.includes("C");
+    const chips=tg.filter(k=>k!=="L"&&k!=="C").map(k=>`<span class="chip">${k}</span>`).join("")+(cap?'<span class="chip C">C</span>':"")+(lib?'<span class="chip">L</span>':"");
+    return `<button class="pl ${lib?"lib":""}" style="--lc:#e53935" data-a="live-player" data-pid="${esc(p.pid)}" data-fk="L${esc(p.pid)}" title="${esc(p.name)}" aria-label="${esc("#"+p.num+" "+p.name)}: edit tags">${esc(p.num)}${p.first?`<small>${esc(p.first)}</small>`:""}<span class="chips">${chips}</span>${serving?ICON.ball:""}</button>`;};
   const half=(t,cls,lay)=>{let h="";lay.forEach(row=>row.forEach(i=>{h+=`<div class="slot"><span class="posno">${i+1}</span>${pl(TT[t].court[i],i===0&&d.serve===t)}</div>`;}));return `<div class="half ${cls}" style="--tc:${TT[t].color}">${h}</div>`;};
   const bench=(t,cls)=>{const tm=TT[t]; const list=tm.ps.filter(p=>!tm.onIds.includes(p.pos)).sort((a,b)=>(b.lib-a.lib)||(+a.num- +b.num));
     return `<div class="bench ${cls}" style="--tc:${tm.color}">${list.map(p=>pl(p,false)).join("")}</div>`;};
@@ -727,6 +754,12 @@ document.addEventListener("click",e=>{
       if(!id) return toast("Paste a match link or match number");
       S.liveLast=raw.trim(); S.liveHash=hash; S.live={id,hash,data:null,err:null,left:0,at:0};
       S.screen="live"; commit(); return startPoll();
+    }
+    case "live-player": return liveTagSheet(pid);
+    case "ltag": {
+      S.liveTags=S.liveTags||{}; const cur=S.liveTags[pid]||[], k=el.dataset.k;
+      S.liveTags[pid]=cur.includes(k)?cur.filter(x=>x!==k):cur.concat(k);
+      save(); lastSig=""; render(); return liveTagSheet(pid);
     }
     case "live-stop": stopPoll(); S.screen="setup"; return commit();
     case "live-swap": S.live.left=1-(S.live.left||0); lastSig=""; return commit();
