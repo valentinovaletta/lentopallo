@@ -157,6 +157,7 @@ input,select{font:inherit;color:var(--ink)}
 .fixscore .row{flex-direction:row;border:none;padding:0}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(18px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:8px;font-weight:600;z-index:60;max-width:90vw;text-align:center}
 .result{font-family:var(--cond);font-size:42px;font-weight:800;text-align:center;margin:6px 0}
+.score.prov{outline:3px dashed var(--warn);outline-offset:3px}
 .livecard{background:var(--surface);border-radius:12px;padding:12px;margin-bottom:12px;display:flex;flex-direction:column;gap:6px;border-left:6px solid var(--danger)}
 .livecard .muted{color:var(--muted);font-size:14px}
 .livecard input{flex:1;min-width:0;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--surface2)}
@@ -675,18 +676,34 @@ async function pollLive(){
     const r=await fetch("https://lentopallo-api.torneopal.net/taso/rest/getMatch?match_id="+encodeURIComponent(L.id)+"&hash="+encodeURIComponent(L.hash),{cache:"no-store"});
     const j=await r.json();
     if(!j.match) throw new Error((j.call&&(j.call.error||j.call.status))||"no match data");
-    L.data=procLive(j.match); L.err=null; L.at=Date.now();
+    L.data=procLive(j.match); L.err=null; L.at=Date.now(); reconcile(L);
   }catch(e){
     L.err=(e instanceof TypeError)?"Can’t reach the results service. Check your connection. Note: when this page is opened on claude.ai, outside requests are blocked, so use your self-hosted copy.":"Results service error: "+e.message;
   }
   liveBusy=false; save();
   if(S.screen!=="live") return;
-  const sig=JSON.stringify([L.data,L.err,L.left]);
+  const sig=JSON.stringify([L.data,L.err,L.left,L.local]);
   if(sig!==lastSig){ lastSig=sig; if(!modalEl.innerHTML) render(); }
   else { const el=document.getElementById("livestat"); if(el) el.innerHTML=liveStat(); }
 }
 function startPoll(){ stopPoll(); lastSig=""; pollLive(); liveTimer=setInterval(pollLive,5000); }
 function stopPoll(){ if(liveTimer) clearInterval(liveTimer); liveTimer=null; }
+function liveTotal(d){ return d.teams[0].pts+d.teams[1].pts; }
+// Points added by hand in live mode, shown until the online scorer catches up
+function applyLocal(d,lc){
+  if(!d||!lc||!lc.adds.length) return d;
+  const v=JSON.parse(JSON.stringify(d));
+  lc.adds.forEach(t=>{ const tm=v.teams[t]; tm.pts++;
+    if(v.serve!==t){ v.serve=t; tm.court=tm.court.slice(1).concat(tm.court.slice(0,1)); tm.onIds=tm.onIds.slice(1,6).concat(tm.onIds.slice(0,1)); } });
+  return v;
+}
+function reconcile(L){
+  const lc=L.local, d=L.data; if(!lc) return;
+  if(!lc.adds.length||d.period!==lc.period||!d.live){ L.local=null; return; }
+  const done=liveTotal(d)-lc.base; if(done<=0) return;
+  if(done>=lc.adds.length){ L.local=null; return; }
+  lc.adds=lc.adds.slice(done); lc.base=liveTotal(d);
+}
 function liveTags(p){ return (S.liveTags||{})[p.pid]||[]; }
 function liveTagSheet(pid){
   const d=S.live&&S.live.data; if(!d) return;
@@ -697,7 +714,8 @@ function liveTagSheet(pid){
   sheet("#"+p.num+" "+p.name,"Tags are saved for this player and shown again in future matches.",[{label:"Done",cls:"primary",fn:()=>{closeModal();lastSig="";render();}}],html);
 }
 function renderLive(){
-  const L=S.live, d=L.data;
+  const L=S.live, d=applyLocal(L.data,L.local);
+  const pend=t=>L.local?L.local.adds.filter(x=>x===t).length:0, npend=L.local?L.local.adds.length:0;
   const open=new Set([...app.querySelectorAll("details[id]")].filter(x=>x.open).map(x=>x.id));
   const top=`<div class="topbar"><div class="grp"><button class="btn small" data-a="live-stop">Back</button>
     <button class="btn small" data-a="live-swap">${ICON.swap.replace("<svg",'<svg width="18" height="18"')}Swap sides</button></div>
@@ -706,7 +724,7 @@ function renderLive(){
   if(!d){ app.innerHTML=top+err+(L.err?"":`<p class="lead" style="margin-top:20px">Loading match ${esc(L.id)}…</p>`); return; }
   const l=L.left||0, r=1-l, TT=d.teams;
   const side=(t,cls)=>{const tm=TT[t]; return `<div class="tpanel ${cls}" style="--tc:${tm.color}"><div class="tname">${esc(tm.name)}</div>
-    <div class="score">${tm.pts}${d.serve===t?'<span class="sv">'+ICON.ball+'</span>':""}</div>
+    <button class="score ${pend(t)?"prov":""}" data-a="live-point" data-t="${t}" ${d.live?"":"disabled"} aria-label="Point to ${esc(tm.name)}">${tm.pts}${d.live?'<span class="plus">+1</span>':""}${d.serve===t?'<span class="sv">'+ICON.ball+'</span>':""}</button>
     <div class="meta">Timeouts ${tm.to}/${d.maxTO} · Subs ${tm.subs}/${d.maxSubs}</div></div>`;};
   const pl=(p,serving)=>{ if(!p) return `<div class="pl empty">?</div>`;
     const tg=liveTags(p), lib=p.lib||tg.includes("L"), cap=p.cap||tg.includes("C");
@@ -718,7 +736,7 @@ function renderLive(){
   const noRot=TT.every(tm=>tm.court.every(x=>!x));
   const prev=d.hist.map(h=>h[l]+"–"+h[r]).join(", ");
   const scorers=t=>TT[t].ps.slice().sort((a,b)=>b.pts-a.pts).map(p=>`<li><b>${p.pts}</b><span>#${esc(p.num)} ${esc(p.name)}</span></li>`).join("");
-  app.innerHTML=top+err+`<div class="meta" style="margin-top:8px">${esc(d.title)}</div>
+  app.innerHTML=top+err+(npend?`<div class="banner"><span>${npend} point${npend>1?"s":""} added here, waiting for the online scorer to confirm.</span><button class="btn small" data-a="live-undo">Undo</button></div>`:"")+`<div class="meta" style="margin-top:8px">${esc(d.title)}</div>
    <div class="board">${side(l,"left")}<div class="mid"><div class="setlabel">${d.live?"Set "+d.period:"Final"}</div><div class="sets">${TT[l].sets} : ${TT[r].sets}</div><div class="prevsets">${prev}</div></div>${side(r,"right")}</div>
    ${noRot?'<div class="banner"><span>The online scorer hasn’t entered player positions for this match, so only the score is shown.</span></div>':""}
    <div class="courtwrap"><div class="court">${half(l,"l",LAYOUT_L)}${half(r,"r",LAYOUT_R)}</div><div class="benches">${bench(l,"l")}${bench(r,"r")}</div></div>
@@ -755,6 +773,12 @@ document.addEventListener("click",e=>{
       S.liveLast=raw.trim(); S.liveHash=hash; S.live={id,hash,data:null,err:null,left:0,at:0};
       S.screen="live"; commit(); return startPoll();
     }
+    case "live-point": {
+      const L=S.live; if(!L||!L.data||!L.data.live) return;
+      if(!L.local) L.local={period:L.data.period,base:liveTotal(L.data),adds:[]};
+      L.local.adds.push(t); save(); lastSig=""; return render();
+    }
+    case "live-undo": { const L=S.live; if(L&&L.local){ L.local.adds.pop(); if(!L.local.adds.length) L.local=null; } save(); lastSig=""; return render(); }
     case "live-player": return liveTagSheet(pid);
     case "ltag": {
       S.liveTags=S.liveTags||{}; const cur=S.liveTags[pid]||[], k=el.dataset.k;
